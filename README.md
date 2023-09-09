@@ -46,10 +46,11 @@ Put `target/release/wasmtime` somewhere in `PATH`.
 
 Here we implement a simple component to the wasi:cli/command world interface that modern wasmtime can use. Instead of a `main` function, the component needs to implement a `run` function. 
 
-### Link to the wasi:cli/command world wit in wasmtime and build the interface files
+### Build the interface files
+
+The `wit` directory contains a copy of the wasi:cli/command world which normally is found in the wasmtime repo.
 
 ```
-ln -s <wasmtime-directory>/crates/wasi/wit wit
 wit-bindgen c wit  --world=wasi:cli/command
 ```
 
@@ -113,3 +114,106 @@ Hello component!
 
 Note: the output should really be the text repeated twice, but due to a bug in wasmtime, the blocked output does not work properly at this time.
 
+# Adding another C-component
+
+Consider a change in the component above to call another component which has an exported function to add two numbers.
+
+We need a new wit that combines the interface of the new component with the wasi:cli/command world. 
+
+```
+interface adder {
+    add: func(a: s32, b: s32) -> s32
+}
+
+world adderw {
+    export adder
+}
+
+world adderi {
+    import adder
+    include wasi:cli/command
+}
+
+```
+
+Generate the needed interface files for the two worlds in this wit-file like this:
+
+```
+wit-bindgen c wit --world=adderi
+wit-bindgen c wit --world=adderw
+```
+
+This are the generated files: 
+
+```
+Generating "adderi.c"
+Generating "adderi.h"
+Generating "adderi_component_type.o"
+Generating "adderw.c"
+Generating "adderw.h"
+Generating "adderw_component_type.o"
+```
+
+Now change the original component to call a function in another component, specified by the world `adderi` above, which contains the previously used `wasi:cli/command` world and the adder interface.
+
+```
+#include "adderi.h"
+
+// The run-function required by the wit interface
+bool exports_wasi_cli_run_run() {
+
+    wasi_cli_stdout_output_stream_t stdout_stream = wasi_cli_stdout_get_stdout();
+
+    // NEW: a call to another component
+    int32_t added = wasmtime_wasi_adder_add(23, 19);
+
+    char * str = (added != 23+19) ? "Wrong value" : "Hello component!\n";
+
+    adderi_list_u8_t str_p;
+    str_p.ptr = str;
+    str_p.len = strlen(str);
+
+    adderi_tuple2_u64_wasi_io_streams_stream_status_t ret;
+
+    // Doing some extra outputs to force a flush as blocking doesn't worj properly
+    wasi_io_streams_blocking_write(stdout_stream, &str_p, &ret);
+    wasi_io_streams_blocking_write(stdout_stream, &str_p, &ret);
+
+    return true;
+}
+```
+
+Next, define the component with the adder interface:
+
+```
+#include "adderw.h"
+
+int32_t exports_wasmtime_wasi_adder_add(int32_t a, int32_t b){
+    return a + b;
+}
+
+```
+
+With all the parts and components in place, let's compile and generate the components.
+
+The component which exports `run` and which calls the adder component:
+```
+/opt/wasi-sdk/bin/clang adderi.c call_adder.c adderi_component_type.o -o call_adder.core.wasm -mexec-model=reactor
+wasm-tools component new call_adder.core.wasm  -o call_adder.c.wasm
+```
+
+The adder component:
+```
+/opt/wasi-sdk/bin/clang adderw.c adder.c adderw_component_type.o -o adder.core.wasm -mexec-model=reactor
+wasm-tools component new adder.core.wasm -o adder.c.wasm
+```
+
+Then, build a composed Webassembly component:
+```
+wasm-tools compose -o adding.wasm call_adder.c.wasm -d adder.c.wasm
+```
+
+We are now ready to call the assembly of components with wasmtime:
+```
+wasmtime adding.wasm --wasm-features component-model
+```

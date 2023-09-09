@@ -1,0 +1,13 @@
+
+interface adder {
+    add: func(a: s32, b: s32) -> s32
+}
+
+world adderw {
+    export adder
+}
+
+world adderi {
+    import adder
+    include wasi:cli/command
+}
